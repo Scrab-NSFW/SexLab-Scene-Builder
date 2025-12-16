@@ -602,8 +602,8 @@ function App() {
             },
       }}
     >
-      <Layout hasSider>
-        <PanelGroup direction="horizontal">
+      <Layout hasSider style={{ height: '100vh' }}>
+        <PanelGroup direction="horizontal" style={{ height: '100%' }}>
           {/* Left Panel */}
           <Panel minSize={10} defaultSize={15} maxSize={50} id="left-panel">
             {contextHolder}
@@ -899,7 +899,9 @@ function App() {
                             style={{ overflowY: 'auto' }}
                             className="graph-furniture-selection"
                             value={
-                              activeScene ? activeScene.furniture.furni_types : []
+                              activeScene
+                                ? activeScene.furniture.furni_types
+                                : []
                             }
                             options={Furnitures}
                             mode="multiple"
@@ -915,7 +917,8 @@ function App() {
                                     prev.furniture.furni_types.indexOf('None');
                                   if (where === -1)
                                     prev.furniture.furni_types.push(value);
-                                  else prev.furniture.furni_types[where] = value;
+                                  else
+                                    prev.furniture.furni_types[where] = value;
                                   prev.furniture.allow_bed = false;
                                   return prev;
                                 });
@@ -948,7 +951,9 @@ function App() {
                             }
                             disabled={
                               activeScene &&
-                              !activeScene.furniture.furni_types.includes('None')
+                              !activeScene.furniture.furni_types.includes(
+                                'None'
+                              )
                             }
                           >
                             Allow Bed
@@ -1072,8 +1077,8 @@ function App() {
                   minSize={15}
                   maxSize={50}
                   id="scenePositions"
-                  style={{ minHeight: '150px', maxHeight: '450px' }}
-                  defaultSize={100}
+                  style={{ minHeight: '150px' }}
+                  defaultSize={25}
                 >
                   <Card
                     className="sceneTagsPositions-card"
@@ -1093,6 +1098,8 @@ function App() {
                     <Space direction="horizontal" style={{ width: '100%' }}>
                       <div className="scene-positions-list">
                         {activeScene &&
+                        activeScene.positions &&
+                        activeScene.positions.length > 0 ? (
                           activeScene.positions.map((pos, idx) => (
                             <Col key={pos.id || idx} span={24}>
                               <ScenePosition
@@ -1114,7 +1121,18 @@ function App() {
                                 }}
                               />
                             </Col>
-                          ))}
+                          ))
+                        ) : (
+                          <Col
+                            span={24}
+                            style={{ padding: 12, textAlign: 'center' }}
+                          >
+                            <div style={{ color: 'rgba(0,0,0,0.45)' }}>
+                              No positions yet — use "Add Stage" or add a
+                              position from the stage editor.
+                            </div>
+                          </Col>
+                        )}
                       </div>
                     </Space>
                   </Card>
