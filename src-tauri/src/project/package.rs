@@ -521,7 +521,7 @@ impl EncodeBinary for Package {
                 .scenes
                 .iter()
                 .filter(|(_, scene)| !scene.has_warnings && !scene.stages.is_empty())
-                .fold(size_of::<u32>(), |acc, (_, scene)| {
+                .fold(size_of::<u64>(), |acc, (_, scene)| {
                     acc + scene.get_byte_size()
                 })
     }
@@ -531,7 +531,7 @@ impl EncodeBinary for Package {
         self.pack_name.write_byte(buf);
         self.pack_author.write_byte(buf);
         self.prefix_hash.write_byte(buf);
-        buf.extend_from_slice(&(self.scenes.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&(self.scenes.len() as u64).to_be_bytes());
         self.scenes
             .iter()
             .filter(|(_, scene)| !scene.has_warnings && !scene.stages.is_empty())

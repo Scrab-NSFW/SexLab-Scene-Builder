@@ -152,11 +152,11 @@ pub trait EncodeBinary {
 
 impl EncodeBinary for String {
     fn get_byte_size(&self) -> usize {
-        size_of::<u32>() + self.len() // u32 for length + string bytes
+        size_of::<u64>() + self.len() // u32 for length + string bytes
     }
 
     fn write_byte(&self, buf: &mut Vec<u8>) -> () {
-        let len = self.len() as u32;
+        let len = self.len() as u64;
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(self.as_bytes());
     }
@@ -215,11 +215,11 @@ impl EncodeBinary for u64 {
 
 impl<T: EncodeBinary> EncodeBinary for Vec<T> {
     fn get_byte_size(&self) -> usize {
-        size_of::<u32>() + self.iter().map(|item| item.get_byte_size()).sum::<usize>()
+        size_of::<u64>() + self.iter().map(|item| item.get_byte_size()).sum::<usize>()
     }
 
     fn write_byte(&self, buf: &mut Vec<u8>) -> () {
-        let len = self.len() as u32;
+        let len = self.len() as u64;
         buf.extend_from_slice(&len.to_be_bytes());
         for item in self {
             item.write_byte(buf);
@@ -229,14 +229,14 @@ impl<T: EncodeBinary> EncodeBinary for Vec<T> {
 
 impl<K: EncodeBinary, V: EncodeBinary> EncodeBinary for HashMap<K, V> {
     fn get_byte_size(&self) -> usize {
-        size_of::<u32>() + 
+        size_of::<u64>() + 
         self.iter()
             .map(|(key, value)| key.get_byte_size() + value.get_byte_size())
             .sum::<usize>()
     }
 
     fn write_byte(&self, buf: &mut Vec<u8>) -> () {
-        let len = self.len() as u32;
+        let len = self.len() as u64;
         buf.extend_from_slice(&len.to_be_bytes());
         for (key, value) in self {
             key.write_byte(buf);
