@@ -70,18 +70,22 @@ fn is_fnis_animlist_layout(list_path: &Path) -> bool {
     else {
         return false;
     };
-    let Some(actors_idx) = components
+    // Require actors/animations *after* meshes so a parent folder named
+    // "Animations" (e.g. /mnt/Data/Coding/Animations/...) is ignored.
+    let Some(actors_rel) = components[meshes_idx + 1..]
         .iter()
         .position(|c| c.eq_ignore_ascii_case("actors"))
     else {
         return false;
     };
-    let Some(anim_idx) = components
+    let actors_idx = meshes_idx + 1 + actors_rel;
+    let Some(anim_rel) = components[actors_idx + 1..]
         .iter()
         .position(|c| c.eq_ignore_ascii_case("animations"))
     else {
         return false;
     };
+    let anim_idx = actors_idx + 1 + anim_rel;
     // meshes/actors/<≥1 race components>/animations/<pack>/file
     actors_idx == meshes_idx + 1
         && anim_idx > actors_idx + 1
@@ -261,6 +265,24 @@ fn visit_lists(dir: &Path, f: &mut dyn FnMut(&Path)) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn layout_ignores_parent_folder_named_animations() {
+        let p = Path::new(
+            "/mnt/Data/Coding/Animations/Export/.Moon_Lovemaking_Compendium.slsb-staging-1/meshes/actors/character/animations/Moon_Lovemaking_Compendium/FNIS_Moon_Lovemaking_Compendium_List.txt",
+        );
+        assert!(
+            is_fnis_animlist_layout(p),
+            "path under a parent 'Animations' dir should still be valid"
+        );
+        assert!(behavior_path_for_list(p).is_some());
+    }
 }
 
 #[cfg(test)]

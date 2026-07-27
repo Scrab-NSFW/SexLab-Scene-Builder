@@ -10,6 +10,12 @@ use super::{
     NanoID,
 };
 
+fn normalize_graph_scenes(graph: &mut HashMap<NanoID, Node>, scene_id: &NanoID) {
+    for node in graph.values_mut() {
+        node.normalize_scenes(scene_id);
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Scene {
     pub id: NanoID,
@@ -87,7 +93,12 @@ impl Scene {
                 .map(|pos| pos.extract_position_info())
                 .collect();
         }
+        normalize_graph_scenes(&mut self.graph, &self.id);
         Ok(self)
+    }
+
+    pub fn prepare_for_encode(&mut self) {
+        normalize_graph_scenes(&mut self.graph, &self.id);
     }
 }
 
@@ -121,11 +132,13 @@ impl EncodeBinary for Scene {
     }
 
     fn write_byte(&self, buf: &mut Vec<u8>) -> () {
+        let mut graph = self.graph.clone();
+        normalize_graph_scenes(&mut graph, &self.id);
         self.id.write_byte(buf);
         self.name.write_byte(buf);
         self.positions.write_byte(buf);
         self.stages.write_byte(buf);
-        self.graph.write_byte(buf);
+        graph.write_byte(buf);
         self.furniture.write_byte(buf);
         self.private.write_byte(buf);
     }

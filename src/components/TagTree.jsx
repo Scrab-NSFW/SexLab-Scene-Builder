@@ -7,11 +7,25 @@ function tagKey(tag) {
   return String(tag).toLowerCase().replace(/\s+/g, '');
 }
 
+/** Managed elsewhere (folder field / nav editor / import ids) — keep but don't list. */
+function isManagedTag(tag) {
+  const t = String(tag);
+  return (
+    t.startsWith('ostim_nav:') ||
+    t.startsWith('ostim_nav_origin:') ||
+    t.startsWith('ostim_id:') ||
+    t.startsWith('ostim_folder:') ||
+    t.startsWith('ostim_dest:') ||
+    t.startsWith('ostim_group:')
+  );
+}
+
 function TagTree({
   tags,
   onChange,
   tagsSFW = [],
   tagsNSFW = [],
+  tagsOStimActions = [],
   ...selectProps
 }) {
   const [userTags, setUserTags] = useState(() => loadUserTags());
@@ -19,9 +33,24 @@ function TagTree({
   const [editingTag, setEditingTag] = useState(null);
   const [editDraft, setEditDraft] = useState('');
   const presets = useMemo(
-    () => [...tagsSFW, ...tagsNSFW],
+    () => [...tagsSFW, ...tagsNSFW, ...tagsOStimActions],
+    [tagsSFW, tagsNSFW, tagsOStimActions]
+  );
+  const sexlabKeys = useMemo(
+    () => new Set([...tagsSFW, ...tagsNSFW].map((tag) => tagKey(tag))),
     [tagsSFW, tagsNSFW]
   );
+  /** Bare action type → `action:type` when it does not collide with SFW/NSFW. */
+  const actionBareByKey = useMemo(() => {
+    const m = new Map();
+    for (const tag of tagsOStimActions) {
+      const type = String(tag).replace(/^action:/i, '');
+      const k = tagKey(type);
+      if (!k || sexlabKeys.has(k)) continue;
+      m.set(k, tag);
+    }
+    return m;
+  }, [tagsOStimActions, sexlabKeys]);
   const presetByKey = useMemo(
     () => new Map(presets.map((tag) => [tagKey(tag), tag])),
     [presets]
@@ -38,25 +67,35 @@ function TagTree({
   const canonicalize = (tag) => {
     const trimmed = String(tag ?? '').trim();
     if (!trimmed) return '';
-    return presetByKey.get(tagKey(trimmed)) ?? trimmed;
+    const key = tagKey(trimmed);
+    if (presetByKey.has(key)) return presetByKey.get(key);
+    if (actionBareByKey.has(key)) return actionBareByKey.get(key);
+    return trimmed;
   };
 
   const canonicalValue = useMemo(
-    () => (tags || []).map(canonicalize).filter(Boolean),
+    () =>
+      (tags || [])
+        .filter((t) => !isManagedTag(t))
+        .map(canonicalize)
+        .filter(Boolean),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tags, presetByKey]
+    [tags, presetByKey, actionBareByKey]
   );
 
   const yoursOptions = useMemo(() => {
     const byKey = new Map();
     for (const tag of userTags) {
       const trimmed = String(tag ?? '').trim();
-      if (!trimmed || presetKeys.has(tagKey(trimmed))) continue;
+      if (!trimmed || isManagedTag(trimmed) || presetKeys.has(tagKey(trimmed)))
+        continue;
       byKey.set(tagKey(trimmed), trimmed);
     }
     for (const tag of tags || []) {
       const trimmed = String(tag ?? '').trim();
-      if (!trimmed || presetKeys.has(tagKey(trimmed))) continue;
+      if (!trimmed || isManagedTag(trimmed) || presetKeys.has(tagKey(trimmed)))
+        continue;
+      // Full `action:type:a:t:p` stays visible under Yours.
       byKey.set(tagKey(trimmed), trimmed);
     }
     return [...byKey.values()].sort((a, b) => a.localeCompare(b));
@@ -66,25 +105,27 @@ function TagTree({
     const trimmed = searchValue.trim();
     if (!trimmed) return null;
     const key = tagKey(trimmed);
-    if (presetKeys.has(key)) return null;
+    if (presetKeys.has(key) || actionBareByKey.has(key)) return null;
     if (yoursOptions.some((tag) => tagKey(tag) === key)) return null;
     return trimmed;
-  }, [searchValue, presetKeys, yoursOptions]);
+  }, [searchValue, presetKeys, actionBareByKey, yoursOptions]);
 
   const commitTags = (next) => {
     const cleaned = [];
     const seen = new Set();
     for (const tag of next || []) {
       const canonical = canonicalize(tag);
-      if (!canonical) continue;
+      if (!canonical || isManagedTag(canonical)) continue;
       const key = tagKey(canonical);
       if (seen.has(key)) continue;
       seen.add(key);
       cleaned.push(canonical);
     }
+    const managed = (tags || []).filter((t) => isManagedTag(t));
+    const merged = [...cleaned, ...managed];
     setUserTags(rememberUserTags(cleaned, presets));
     setSearchValue('');
-    onChange(cleaned);
+    onChange(merged);
   };
 
   const tryCreateFromSearch = () => {
@@ -136,7 +177,9 @@ function TagTree({
     setUserTags(nextList);
     const oldKey = tagKey(editingTag);
     const renamed = String(editDraft).trim();
-    const next = (tags || []).map((t) => (tagKey(t) === oldKey ? renamed : t));
+    const next = (tags || []).map((t) =>
+      !isManagedTag(t) && tagKey(t) === oldKey ? renamed : t
+    );
     if (next.some((t, i) => t !== (tags || [])[i])) {
       onChange(next);
     }
@@ -158,6 +201,15 @@ function TagTree({
         options: tagsNSFW.map((tag) => ({ value: tag, label: tag })),
       },
     ];
+    if (tagsOStimActions.length) {
+      groups.push({
+        label: 'OStim Actions',
+        options: tagsOStimActions.map((tag) => ({
+          value: tag,
+          label: String(tag).replace(/^action:/i, ''),
+        })),
+      });
+    }
     if (yours.length) {
       groups.push({
         label: 'Yours',
@@ -210,7 +262,15 @@ function TagTree({
     }
     return groups;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tagsSFW, tagsNSFW, yoursOptions, pendingCreate, savedKeys, tags]);
+  }, [
+    tagsSFW,
+    tagsNSFW,
+    tagsOStimActions,
+    yoursOptions,
+    pendingCreate,
+    savedKeys,
+    tags,
+  ]);
 
   return (
     <>
@@ -240,12 +300,15 @@ function TagTree({
           }
         }}
         tagRender={({ label, value, closable, onClose }) => {
-          const search = String(value).toLowerCase();
-          const color = tagsSFW.find((it) => it.toLowerCase() === search)
-            ? 'cyan'
-            : tagsNSFW.find((it) => it.toLowerCase() === search)
-              ? 'volcano'
-              : 'purple';
+          const raw = String(value);
+          const search = raw.toLowerCase();
+          const color = raw.toLowerCase().startsWith('action:')
+            ? 'geekblue'
+            : tagsSFW.find((it) => it.toLowerCase() === search)
+              ? 'cyan'
+              : tagsNSFW.find((it) => it.toLowerCase() === search)
+                ? 'volcano'
+                : 'purple';
 
           const onPreventMouseDown = (evt) => {
             evt.preventDefault();

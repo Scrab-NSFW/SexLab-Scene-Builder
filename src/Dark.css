@@ -85,10 +85,10 @@
     background-color: var(--input-background);
 }
 
-/* Graph */
+/* Graph — contrast comes from grid args; do not crush with opacity. */
 
 #root.dark-mode .x6-graph-grid {
-    opacity: 0.2;
+    opacity: 1;
 }
 
 #root.dark-mode span.ant-btn-icon span.anticon {

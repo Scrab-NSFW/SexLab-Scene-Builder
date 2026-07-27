@@ -49,6 +49,28 @@
             }
           ]
         },
+        "convert-ostim": {
+          "description": "Import an OStim pack folder into an SLSB project JSON",
+          "args": [
+            {
+              "name": "in",
+              "takesValue": true,
+              "short": "i",
+              "description": "OStim pack root (or scenes folder)"
+            },
+            {
+              "name": "out",
+              "takesValue": true,
+              "short": "d",
+              "description": "Output directory for .slsb.json"
+            },
+            {
+              "name": "hkx",
+              "takesValue": false,
+              "description": "Also copy/rename OStim .hkx clips to SexLab _A#_S# names under out/"
+            }
+          ]
+        },
         "build": {
           "args": [
             {
@@ -65,6 +87,16 @@
               "name": "slal",
               "takesValue": false,
               "description": "Also write SLAnims/json SLAL registration (linear scenes only)"
+            },
+            {
+              "name": "ostim",
+              "takesValue": false,
+              "description": "Also write OStim scenes + animlist + Nemesis stub under OStim/"
+            },
+            {
+              "name": "hkx",
+              "takesValue": true,
+              "description": "Optional folder to search for .hkx clips when exporting OStim"
             }
           ]
         },
@@ -80,6 +112,46 @@
               "name": "out",
               "takesValue": true,
               "short": "o"
+            }
+          ]
+        },
+        "export-ostim": {
+          "description": "Export OStim scenes, animlist, and Nemesis stub from an SLSB project",
+          "args": [
+            {
+              "name": "in",
+              "takesValue": true,
+              "short": "i"
+            },
+            {
+              "name": "out",
+              "takesValue": true,
+              "short": "o"
+            },
+            {
+              "name": "hkx",
+              "takesValue": true,
+              "description": "Optional folder to search for SexLab .hkx clips to rename/copy"
+            }
+          ]
+        },
+        "export-ostim-json": {
+          "description": "Export OStim scene JSON only for one SLSB scene (no animlist/Nemesis/HKX)",
+          "args": [
+            {
+              "name": "in",
+              "takesValue": true,
+              "short": "i"
+            },
+            {
+              "name": "out",
+              "takesValue": true,
+              "short": "o"
+            },
+            {
+              "name": "scene",
+              "takesValue": true,
+              "description": "SLSB scene NanoID to export"
             }
           ]
         },

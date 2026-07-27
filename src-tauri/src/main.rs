@@ -10,7 +10,7 @@ mod window_geometry;
 
 use log::{error, info};
 use once_cell::sync::Lazy;
-use project::{package::{ExportKind, Package}, position::Position, scene::Scene, stage::Stage, NanoID};
+use project::{package::{AssetLibrary, ExportFormats, Package}, position::Position, progress::JobProgress, scene::Scene, stage::Stage, NanoID};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -34,6 +34,8 @@ struct ProjectUpdatePayload<'a> {
     scenes: &'a indexmap::IndexMap<NanoID, Scene>,
     pack_name: &'a str,
     pack_author: &'a str,
+    pack_version: &'a str,
+    asset_library: &'a AssetLibrary,
 }
 
 fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
@@ -41,6 +43,8 @@ fn emit_project_update<R: Runtime>(emitter: &impl Emitter<R>, prjct: &Package) {
         scenes: &prjct.scenes,
         pack_name: &prjct.pack_name,
         pack_author: &prjct.pack_author,
+        pack_version: &prjct.pack_version,
+        asset_library: &prjct.asset_library,
     };
     if let Err(e) = emitter.emit("on_project_update", &payload) {
         error!("Failed to emit on_project_update: {}", e);
@@ -68,10 +72,118 @@ fn set_export_clip_tip_hidden(hidden: bool) {
     let _ = std::fs::write(path, if hidden { "1" } else { "0" });
 }
 
-fn run_export(app: AppHandle, kind: ExportKind) {
+fn export_merge_warn_pref_path() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("SexLabSceneBuilder").join("hide_export_merge_warn"))
+}
+
+fn is_export_merge_warn_hidden() -> bool {
+    export_merge_warn_pref_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn set_export_merge_warn_hidden(hidden: bool) {
+    let Some(path) = export_merge_warn_pref_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, if hidden { "1" } else { "0" });
+}
+
+fn run_export(app: AppHandle, formats: ExportFormats) {
+    if !formats.any() {
+        app.dialog()
+            .message("Select at least one format to export.")
+            .title("Export")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::Ok)
+            .show(|_| {});
+        return;
+    }
     tauri::async_runtime::spawn(async move {
-        let prjct = PROJECT.lock().unwrap();
-        if let Err(err) = prjct.export_as(&app, kind) {
+        let (pack_root, write_roots, fnis_mod) = {
+            let prjct = PROJECT.lock().unwrap();
+            match prjct.pick_export_paths_for(&app, formats) {
+                Ok((root, roots)) => (root, roots, prjct.fnis_mod_name()),
+                Err(err) => {
+                    if err != "Export cancelled" {
+                        error!("Failed to export project: {}", err);
+                        app.dialog()
+                            .message(&err)
+                            .title("Export failed")
+                            .kind(MessageDialogKind::Error)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                    return;
+                }
+            }
+        };
+
+        let would_merge = write_roots
+            .iter()
+            .any(|p| project::package::dir_nonempty(p));
+        if would_merge && !is_export_merge_warn_hidden() {
+            let message = if formats.ostim && !formats.slsb && !formats.slal {
+                format!(
+                    "Export writes into a subfolder named {fnis_mod}. That folder already has files.\n\n\
+                     OStim export will merge: only changed scene JSON is rewritten, missing HKX \
+                     are copied, and new animlist lines are appended. Other files are kept.\n\n\
+                     Continue?"
+                )
+            } else {
+                format!(
+                    "Export writes into a subfolder named {fnis_mod} and merges with anything already there.\n\n\
+                     The pack folder is not deleted. Matching generated files (AnimLists, Behavior, \
+                     registry, scene JSON) are overwritten. Other files already in the folder \
+                     (such as .hkx animation clips) are kept.\n\n\
+                     Continue?"
+                )
+            };
+            let proceed = app
+                .dialog()
+                .message(message)
+                .title("Export merge")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Continue".into(),
+                    "Cancel".into(),
+                ))
+                .blocking_show();
+            if !proceed {
+                return;
+            }
+            let hide = app
+                .dialog()
+                .message("Don't warn about export overwrites again?")
+                .title("Export merge")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::YesNo)
+                .blocking_show();
+            if hide {
+                set_export_merge_warn_hidden(true);
+            }
+        }
+
+        let result = {
+            let title = formats.label();
+            let progress = JobProgress::new(Some(&app), "export", &title);
+            progress.start("Exporting pack…");
+            let result = {
+                let prjct = PROJECT.lock().unwrap();
+                prjct.export_formats_into(&pack_root, formats, Some(&progress))
+            };
+            match &result {
+                Ok(()) => progress.done(),
+                Err(err) if err == "Export cancelled" => {}
+                Err(err) => progress.fail(err),
+            }
+            result
+        };
+        if let Err(err) = result {
             if err == "Export cancelled" {
                 return;
             }
@@ -86,17 +198,26 @@ fn run_export(app: AppHandle, kind: ExportKind) {
     });
 }
 
-/// Show the Pandora clip-folder tip (unless dismissed), then open the export picker.
-fn start_export_with_tip(app: &AppHandle, kind: ExportKind) {
+/// Show the Pandora clip-folder tip when SexLab formats are included, then open the picker.
+fn start_export_with_tip(app: &AppHandle, formats: ExportFormats) {
+    if !formats.slsb && !formats.slal {
+        run_export(app.clone(), formats);
+        return;
+    }
     if is_export_clip_tip_hidden() {
-        run_export(app.clone(), kind);
+        run_export(app.clone(), formats);
         return;
     }
 
     let fnis_mod = PROJECT.lock().unwrap().fnis_mod_name();
     let message = format!(
-        "Export writes AnimLists, Behavior files, and registry data — not your .hkx animation clips.\n\n\
-         Copy your animation HKX files into:\n\
+        "Export writes into a subfolder named {fnis_mod} under the folder you pick.\n\n\
+         It writes AnimLists, Behavior files, and registry data into that pack folder.\n\
+         Existing matching generated files are overwritten; other files already there \
+         (such as .hkx clips) are kept — the folder is not wiped.\n\n\
+         If this project was imported from OStim, matching .hkx clips are copied automatically \
+         using the event names on each stage.\n\n\
+         Otherwise, place animation HKX files in:\n\
          meshes/actors/<race>/animations/{fnis_mod}/\n\n\
          For humans that is usually:\n\
          meshes/actors/character/animations/{fnis_mod}/\n\n\
@@ -127,7 +248,7 @@ fn start_export_with_tip(app: &AppHandle, kind: ExportKind) {
                     if hide {
                         set_export_clip_tip_hidden(true);
                     }
-                    run_export(app_hide, kind);
+                    run_export(app_hide, formats);
                 });
         });
 }
@@ -388,6 +509,9 @@ const MAIN_WINDOW: &str = "main_window";
 const NEW_PROJECT: &str = "new_prjct";
 const OPEN_PROJECT: &str = "open_prjct";
 const IMPORT_SLAL: &str = "import_slal";
+const IMPORT_OSTIM: &str = "import_ostim";
+const IMPORT_ASSET_LIBRARY: &str = "import_asset_library";
+const MANAGE_ASSET_LIBRARY: &str = "manage_asset_library";
 const ENRICH_SLANIM: &str = "enrich_slanim";
 const ENRICH_FNIS: &str = "enrich_fnis";
 const THEME_SYSTEM: &str = "theme_system";
@@ -410,6 +534,7 @@ fn main() {
             request_project_update,
             set_pack_name,
             set_pack_author,
+            set_pack_version,
             get_race_keys,
             create_blank_scene,
             save_scene,
@@ -417,17 +542,25 @@ fn main() {
             open_stage_editor,
             open_stage_editor_from,
             stage_save_and_close,
+            export_ostim_scene_json,
+            start_pack_export,
             make_position,
             mark_as_edited,
-            get_in_darkmode
+            get_in_darkmode,
+            write_export_file,
+            set_asset_library,
+            replace_asset_library
         ])
         .setup(|app| {
             let matches = app.cli().matches()?;
             if let Some(command) = matches.subcommand {
                 let res = match command.name.as_str() {
                     "convert" => cli::convert(command.matches.args),
+                    "convert-ostim" => cli::convert_ostim(command.matches.args),
                     "build" => cli::build(command.matches.args),
                     "export-slal" => cli::export_slal(command.matches.args),
+                    "export-ostim" => cli::export_ostim(command.matches.args),
+                    "export-ostim-json" => cli::export_ostim_json(command.matches.args),
                     "generate-behaviors" => cli::generate_behaviors(command.matches.args),
                     _ => Err(format!("Unrecognized subcommand: {}", command.name)),
                 };
@@ -486,7 +619,8 @@ fn main() {
                     }
                 }
                 tauri::WindowEvent::CloseRequested { .. }
-                    if window.label().starts_with("stage_editor_") =>
+                    if window.label() == STAGE_EDITOR_LABEL
+                        || window.label().starts_with("stage_editor_") =>
                 {
                     window_geometry::save_window_geometry_by_label(
                         window.app_handle(),
@@ -494,7 +628,8 @@ fn main() {
                     );
                 }
                 tauri::WindowEvent::Destroyed
-                    if window.label().starts_with("stage_editor_") =>
+                    if window.label() == STAGE_EDITOR_LABEL
+                        || window.label().starts_with("stage_editor_") =>
                 {
                     unblock_main_if_no_stage_editors(window.app_handle());
                 }
@@ -506,19 +641,37 @@ fn main() {
 }
 
 fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
+    let app = window.app_handle().clone();
+    let (job, title) = match reload_type {
+        NEW_PROJECT => ("new_project", "New Project"),
+        OPEN_PROJECT => ("open_project", "Open Project"),
+        IMPORT_SLAL => ("import_slal", "Import SLAL"),
+        IMPORT_OSTIM => ("import_ostim", "Import OStim"),
+        _ => ("load", "Load"),
+    };
+    let progress = JobProgress::new(Some(&app), job, title);
+
     let mut prjct = PROJECT.lock().unwrap();
     let result = match reload_type {
         NEW_PROJECT => {
+            progress.start("Creating new project…");
             prjct.reset();
             Ok(())
         }
-        OPEN_PROJECT => prjct.load_project(window.app_handle()),
-        IMPORT_SLAL => prjct.load_slal(window.app_handle()),
+        OPEN_PROJECT => prjct.load_project(&app, &progress),
+        IMPORT_SLAL => prjct.load_slal(&app, &progress),
+        IMPORT_OSTIM => prjct.load_ostim(&app, &progress),
         _ => Err(format!("Invalid reload type: {}", reload_type)),
     };
 
     if let Err(e) = result {
+        // Folder/file pick cancelled — progress never started.
+        if e.starts_with("No path to") {
+            info!("{}", e);
+            return;
+        }
         error!("{}", e);
+        progress.fail(&e);
         window
             .app_handle()
             .dialog()
@@ -536,11 +689,66 @@ fn reload_project(reload_type: &str, window: &tauri::WebviewWindow) {
             .set_title(format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str());
     }
     // Import leaves an unsaved in-memory project until Save As
-    set_edited(reload_type == IMPORT_SLAL);
+    set_edited(reload_type == IMPORT_SLAL || reload_type == IMPORT_OSTIM);
+    if reload_type == IMPORT_SLAL || reload_type == IMPORT_OSTIM {
+        prjct.rebuild_asset_library();
+    }
+    let asset_summary = if reload_type == IMPORT_SLAL || reload_type == IMPORT_OSTIM {
+        Some(format!(
+            "Project library: {} HKX/events, {} icons, {} anim objects, {} equip objects.",
+            prjct.asset_library.events.len(),
+            prjct.asset_library.icons.len(),
+            prjct.asset_library.anim_objects.len(),
+            prjct.asset_library.equip_objects.len(),
+        ))
+    } else {
+        None
+    };
+    // Keep the modal open; the frontend closes it after applying scenes.
+    progress.update("Loading scenes into editor…", None, None);
     emit_project_update(window, &prjct);
+    if let Some(summary) = asset_summary {
+        let app = window.app_handle().clone();
+        app.dialog()
+            .message(&summary)
+            .title(if reload_type == IMPORT_OSTIM {
+                "OStim import complete"
+            } else {
+                "SLAL import complete"
+            })
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::Ok)
+            .show(|_| {});
+    }
 }
 
 fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
+    let import_menu = SubmenuBuilder::new(app, "Import")
+        .items(&[
+            &MenuItem::with_id(
+                app,
+                IMPORT_SLAL,
+                "SLAL Pack...",
+                true,
+                Option::<&str>::None,
+            )?,
+            &MenuItem::with_id(
+                app,
+                IMPORT_OSTIM,
+                "OStim...",
+                true,
+                Option::<&str>::None,
+            )?,
+            &MenuItem::with_id(
+                app,
+                "import_offset",
+                "Offset.yaml...",
+                true,
+                Option::<&str>::None,
+            )?,
+        ])
+        .build()?;
+
     let file_menu = SubmenuBuilder::new(app, "File")
         .items(&[
             &MenuItem::with_id(
@@ -557,13 +765,33 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                 true,
                 "cmdOrControl+O".into(),
             )?,
+        ])
+        .separator()
+        .item(&import_menu)
+        .item(&MenuItem::with_id(
+            app,
+            "export_pack",
+            "Export...",
+            true,
+            "cmdOrControl+B".into(),
+        )?)
+        .separator()
+        .items(&[
+            &MenuItem::with_id(app, "save", "Save", true, "cmdOrControl+S".into())?,
             &MenuItem::with_id(
                 app,
-                IMPORT_SLAL,
-                "Import SLAL...",
+                "save_as",
+                "Save As...",
                 true,
-                Option::<&str>::None,
+                "cmdOrControl+Shift+S".into(),
             )?,
+        ])
+        .separator()
+        .quit()
+        .build()?;
+
+    let tools_menu = SubmenuBuilder::new(app, "Tools")
+        .items(&[
             &MenuItem::with_id(
                 app,
                 ENRICH_SLANIM,
@@ -579,55 +807,8 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
                 Option::<&str>::None,
             )?,
         ])
-        .separator()
-        .items(&[
-            &MenuItem::with_id(
-                app,
-                "import_offset",
-                "Import Offset.yaml",
-                true,
-                Option::<&str>::None,
-            )?,
-            &MenuItem::with_id(app, "save", "Save", true, "cmdOrControl+S".into())?,
-            &MenuItem::with_id(
-                app,
-                "save_as",
-                "Save As...",
-                true,
-                "cmdOrControl+Shift+S".into(),
-            )?,
-        ])
-        .separator()
-        .item(
-            &SubmenuBuilder::new(app, "Export")
-                .items(&[
-                    &MenuItem::with_id(
-                        app,
-                        "export_both",
-                        "SLSB + SLAL...",
-                        true,
-                        "cmdOrControl+B".into(),
-                    )?,
-                    &MenuItem::with_id(
-                        app,
-                        "export_slsb",
-                        "SLSB only...",
-                        true,
-                        Option::<&str>::None,
-                    )?,
-                    &MenuItem::with_id(
-                        app,
-                        "export_slal",
-                        "SLAL only...",
-                        true,
-                        Option::<&str>::None,
-                    )?,
-                ])
-                .build()?,
-        )
-        .separator()
-        .quit()
         .build()?;
+
     let theme_menu = SubmenuBuilder::new(app, "Theme")
         .item(&CheckMenuItem::with_id(
             app,
@@ -666,20 +847,43 @@ fn get_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> {
         .text("patreon", "Patreon")
         .text("kofi", "Ko-Fi")
         .build()?;
+    let assets_menu = SubmenuBuilder::new(app, "Assets")
+        .item(&MenuItem::with_id(
+            app,
+            IMPORT_ASSET_LIBRARY,
+            "Import meshes / graphics / HKX…",
+            true,
+            Option::<&str>::None,
+        )?)
+        .item(&MenuItem::with_id(
+            app,
+            MANAGE_ASSET_LIBRARY,
+            "Manage library…",
+            true,
+            Option::<&str>::None,
+        )?)
+        .build()?;
     let top_menu = MenuBuilder::new(app)
-        .items(&[&file_menu, &view_menu, &help_menu])
+        .items(&[
+            &file_menu,
+            &assets_menu,
+            &tools_menu,
+            &view_menu,
+            &help_menu,
+        ])
         .build()?;
     Ok(top_menu)
 }
 
 fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     match event.id().0.as_str() {
-        NEW_PROJECT | OPEN_PROJECT | IMPORT_SLAL => {
+        NEW_PROJECT | OPEN_PROJECT | IMPORT_SLAL | IMPORT_OSTIM => {
             let event_id = event.id().0.clone();
             let window = app.get_webview_window(MAIN_WINDOW).unwrap();
             let title = match event_id.as_str() {
                 NEW_PROJECT => "New Project",
                 OPEN_PROJECT => "Open Project",
+                IMPORT_OSTIM => "Import OStim",
                 _ => "Import SLAL",
             };
             // blocking_* dialogs must not run on the GTK menu/main thread (Linux freeze).
@@ -704,6 +908,74 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             }
             start_reload();
         }
+        IMPORT_ASSET_LIBRARY => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let path = {
+                    let picked = app
+                        .dialog()
+                        .file()
+                        .set_title("Import HKX / OStim icons from folder")
+                        .blocking_pick_folder();
+                    match picked {
+                        Some(p) => match p.into_path() {
+                            Ok(path) => path,
+                            Err(e) => {
+                                error!("{}", e);
+                                return;
+                            }
+                        },
+                        None => return,
+                    }
+                };
+                let result = {
+                    let mut prjct = PROJECT.lock().unwrap();
+                    prjct.import_asset_library_folder(&path)
+                };
+                match result {
+                    Ok((lib, stats)) => {
+                        set_edited(true);
+                        let _ = app.emit("on_asset_library_update", &lib);
+                        let source_note = {
+                            let prjct = PROJECT.lock().unwrap();
+                            prjct
+                                .ostim_source
+                                .as_ref()
+                                .map(|p| format!("\nBinary source: {}", p.display()))
+                                .unwrap_or_default()
+                        };
+                        app.dialog()
+                            .message(format!(
+                                "Scanned {} .hkx and {} icon file(s).\n\
+                                 Library now: {} events, {} icons, {} anim objects, {} equip objects.{}",
+                                stats.hkx_files,
+                                stats.icon_files,
+                                lib.events.len(),
+                                lib.icons.len(),
+                                lib.anim_objects.len(),
+                                lib.equip_objects.len(),
+                                source_note
+                            ))
+                            .title("Assets imported")
+                            .kind(MessageDialogKind::Info)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                    Err(err) => {
+                        error!("{}", err);
+                        app.dialog()
+                            .message(&err)
+                            .title("Import failed")
+                            .kind(MessageDialogKind::Error)
+                            .buttons(MessageDialogButtons::Ok)
+                            .show(|_| {});
+                    }
+                }
+            });
+        }
+        MANAGE_ASSET_LIBRARY => {
+            let _ = app.emit("on_manage_asset_library", ());
+        }
         "save" | "save_as" => {
             let save_as = event.id().0 == "save_as";
             let app = app.clone();
@@ -722,15 +994,40 @@ fn menu_event_listener(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
                         format!("{} - {}", DEFAULT_MAINWINDOW_TITLE, prjct.pack_name).as_str(),
                     );
                 }
+                let _ = app.emit(
+                    "on_project_saved",
+                    serde_json::json!({
+                        "path": prjct.pack_path.display().to_string(),
+                        "packName": prjct.pack_name,
+                    }),
+                );
             });
         }
-        "export_both" | "export_slsb" | "export_slal" => {
-            let kind = match event.id().0.as_str() {
-                "export_slsb" => ExportKind::Slsb,
-                "export_slal" => ExportKind::Slal,
-                _ => ExportKind::Both,
+        "export_pack" => {
+            let _ = app.emit("on_export_dialog", ());
+        }
+        "export_both" | "export_slsb" | "export_slal" | "export_ostim" => {
+            // Legacy menu ids (shortcuts / older builds) → format presets.
+            let formats = match event.id().0.as_str() {
+                "export_slsb" => ExportFormats {
+                    slsb: true,
+                    ..Default::default()
+                },
+                "export_slal" => ExportFormats {
+                    slal: true,
+                    ..Default::default()
+                },
+                "export_ostim" => ExportFormats {
+                    ostim: true,
+                    ..Default::default()
+                },
+                _ => ExportFormats {
+                    slsb: true,
+                    slal: true,
+                    ..Default::default()
+                },
             };
-            start_export_with_tip(app, kind);
+            start_export_with_tip(app, formats);
         }
         THEME_SYSTEM => {
             apply_system_theme(app);
@@ -881,6 +1178,35 @@ fn set_pack_author(author: String) {
 }
 
 #[tauri::command]
+fn set_pack_version(version: String) {
+    PROJECT.lock().unwrap().pack_version = version;
+}
+
+#[tauri::command]
+fn set_asset_library(library: AssetLibrary) -> AssetLibrary {
+    let mut prjct = PROJECT.lock().unwrap();
+    prjct.merge_asset_library(&library);
+    set_edited(true);
+    prjct.asset_library.clone()
+}
+
+/// Replace the project library wholesale (manage / clear UI).
+#[tauri::command]
+fn replace_asset_library<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    library: AssetLibrary,
+) -> AssetLibrary {
+    let mut prjct = PROJECT.lock().unwrap();
+    prjct.asset_library = library;
+    prjct.asset_library.sort();
+    set_edited(true);
+    let lib = prjct.asset_library.clone();
+    drop(prjct);
+    let _ = app.emit("on_asset_library_update", &lib);
+    lib
+}
+
+#[tauri::command]
 async fn get_race_keys() -> Vec<String> {
     racekeys::get_race_keys_string()
 }
@@ -900,6 +1226,17 @@ fn get_in_darkmode() -> bool {
     get_darkmode()
 }
 
+/// Write export contents to an already-chosen path (dialog runs on the frontend).
+/// Keeps the GTK main loop free — never call blocking_save_file from here on Linux.
+#[tauri::command]
+async fn write_export_file(path: String, contents: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::write(&path, contents.as_bytes()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /* Scene */
 
 #[tauri::command]
@@ -908,9 +1245,14 @@ fn create_blank_scene() -> Scene {
 }
 
 #[tauri::command]
-async fn save_scene<R: Runtime>(window: tauri::Window<R>, scene: Scene) -> () {
+async fn save_scene<R: Runtime>(app: tauri::AppHandle<R>, window: tauri::Window<R>, scene: Scene) -> () {
     mark_as_edited(window).await;
-    PROJECT.lock().unwrap().save_scene(scene);
+    let mut prjct = PROJECT.lock().unwrap();
+    prjct.save_scene(scene);
+    prjct.rebuild_asset_library();
+    let lib = prjct.asset_library.clone();
+    drop(prjct);
+    let _ = app.emit("on_asset_library_update", &lib);
 }
 
 #[tauri::command]
@@ -935,18 +1277,42 @@ fn delete_scene<R: Runtime>(window: tauri::Window<R>, id: NanoID) -> Result<Scen
 
 /* Stage */
 
+const STAGE_EDITOR_LABEL: &str = "stage_editor";
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SceneCatalogStage {
+    pub id: NanoID,
+    pub name: String,
+    #[serde(default)]
+    pub ostim_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SceneCatalogEntry {
+    pub id: NanoID,
+    pub name: String,
+    pub stages: Vec<SceneCatalogStage>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct EditorPayload {
     pub scene: NanoID,
     pub stage: Stage,
     pub positions: Vec<PositionInfo>,
     pub dark: bool,
+    #[serde(default)]
+    pub asset_library: AssetLibrary,
+    /// Current scene graph for DestRef editing in the stage window.
+    #[serde(default)]
+    pub graph: std::collections::HashMap<NanoID, crate::project::define::Node>,
+    #[serde(default)]
+    pub scene_catalog: Vec<SceneCatalogEntry>,
 }
 
 fn any_stage_editor_open<R: Runtime>(app: &AppHandle<R>) -> bool {
     app.webview_windows()
         .keys()
-        .any(|label| label.starts_with("stage_editor_"))
+        .any(|label| label == STAGE_EDITOR_LABEL || label.starts_with("stage_editor_"))
 }
 
 fn set_main_window_blocked<R: Runtime>(app: &AppHandle<R>, blocked: bool) {
@@ -967,14 +1333,22 @@ fn unblock_main_if_no_stage_editors<R: Runtime>(app: &AppHandle<R>) {
 
 fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: EditorPayload) {
     let stage = &payload.stage;
-    let label = format!("stage_editor_{}", stage.id.0);
+    let title = format!(
+        "Stage Editor [{}]",
+        if stage.name.is_empty() {
+            "Untitled"
+        } else {
+            stage.name.as_str()
+        }
+    );
     info!(
         "Opening Stage {} from Scene {}",
         stage.id.0, payload.scene.0
     );
-    // Reopening the same stage: focus and re-send payload (recovers empty first open).
-    if let Some(existing) = app.get_webview_window(&label) {
+    // Reuse one editor webview so antd/React are not re-parsed per stage.
+    if let Some(existing) = app.get_webview_window(STAGE_EDITOR_LABEL) {
         set_main_window_blocked(app, true);
+        let _ = existing.set_title(&title);
         let _ = existing.set_focus();
         if let Err(e) = existing.emit("on_data_received", payload.clone()) {
             error!("Failed to re-send stage editor payload: {}", e);
@@ -987,17 +1361,10 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
     };
     let builder = WebviewWindowBuilder::new(
         app,
-        label,
+        STAGE_EDITOR_LABEL,
         tauri::WebviewUrl::App("./stage.html".into()),
     )
-    .title(format!(
-        "Stage Editor [{}]",
-        if stage.name.is_empty() {
-            "Untitled"
-        } else {
-            stage.name.as_str()
-        }
-    ))
+    .title(title)
     .min_inner_size(720.0, 540.0)
     .inner_size(1152.0, 864.0)
     .resizable(true);
@@ -1030,19 +1397,99 @@ fn open_stage_editor_impl<R: Runtime>(app: &tauri::AppHandle<R>, payload: Editor
     sync_theme_from_window(&theme_window);
 }
 
+fn blank_stage_from_parts(
+    existing_stage_count: usize,
+    positions: &[PositionInfo],
+    template: Option<&Stage>,
+) -> Stage {
+    let n = existing_stage_count + 1;
+    let actor_n = positions.len().max(1);
+    Stage {
+        id: NanoID::new_nanoid(),
+        name: format!("Stage {n}/{n}"),
+        positions: template.map_or_else(
+            || vec![crate::project::position::Position::new(None); actor_n],
+            |s| {
+                s.positions
+                    .iter()
+                    .map(|p| crate::project::position::Position::new(Some(p)))
+                    .collect()
+            },
+        ),
+        tags: {
+            let mut tags = Vec::new();
+            if let Some(s) = template {
+                for t in &s.tags {
+                    if t.starts_with("ostim_folder:") {
+                        tags.push(t.clone());
+                    }
+                }
+            }
+            tags
+        },
+        extra: Default::default(),
+    }
+}
+
 #[tauri::command]
 async fn open_stage_editor<R: Runtime>(
     app: tauri::AppHandle<R>,
-    active_scene: Scene,
+    scene_id: NanoID,
+    positions: Vec<PositionInfo>,
     stage: Option<Stage>,
+    #[allow(non_snake_case)]
+    existing_stage_count: Option<usize>,
+    template_stage: Option<Stage>,
+    graph: Option<std::collections::HashMap<NanoID, crate::project::define::Node>>,
+    scene_catalog: Option<Vec<SceneCatalogEntry>>,
 ) -> () {
+    let stage = stage.unwrap_or_else(|| {
+        blank_stage_from_parts(
+            existing_stage_count.unwrap_or(0),
+            &positions,
+            template_stage.as_ref(),
+        )
+    });
+    let (asset_library, fallback_graph, fallback_catalog) = {
+        let mut prjct = PROJECT.lock().unwrap();
+        prjct.rebuild_asset_library();
+        let g = prjct
+            .scenes
+            .get(&scene_id)
+            .map(|s| s.graph.clone())
+            .unwrap_or_default();
+        let catalog: Vec<SceneCatalogEntry> = prjct
+            .scenes
+            .values()
+            .map(|s| SceneCatalogEntry {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                stages: s
+                    .stages
+                    .iter()
+                    .map(|st| SceneCatalogStage {
+                        id: st.id.clone(),
+                        name: st.name.clone(),
+                        ostim_id: st
+                            .tags
+                            .iter()
+                            .find_map(|t| t.strip_prefix("ostim_id:").map(|s| s.to_string())),
+                    })
+                    .collect(),
+            })
+            .collect();
+        (prjct.asset_library.clone(), g, catalog)
+    };
     open_stage_editor_impl(
         &app,
         EditorPayload {
-            scene: active_scene.id.clone(),
-            stage: stage.unwrap_or(Stage::new(&active_scene)),
-            positions: active_scene.positions.clone(),
+            scene: scene_id,
+            stage,
+            positions,
             dark: get_darkmode(),
+            asset_library,
+            graph: graph.unwrap_or(fallback_graph),
+            scene_catalog: scene_catalog.unwrap_or(fallback_catalog),
         },
     );
 }
@@ -1050,24 +1497,154 @@ async fn open_stage_editor<R: Runtime>(
 #[tauri::command]
 async fn open_stage_editor_from<R: Runtime>(
     app: tauri::AppHandle<R>,
-    active_scene: Scene,
+    scene_id: NanoID,
+    positions: Vec<PositionInfo>,
     copy_stage: Stage,
+    #[allow(non_snake_case)]
+    existing_stage_count: Option<usize>,
+    graph: Option<std::collections::HashMap<NanoID, crate::project::define::Node>>,
+    scene_catalog: Option<Vec<SceneCatalogEntry>>,
 ) -> () {
     // Clone must get a fresh id so save inserts a new stage instead of overwriting the source
     let mut stage = copy_stage;
     stage.id = NanoID::new_nanoid();
-    if !stage.name.is_empty() {
+    let n = existing_stage_count.unwrap_or(0) + 1;
+    if stage.name.is_empty() {
+        stage.name = format!("Stage {n}/{n}");
+    } else {
         stage.name = format!("{} (Copy)", stage.name);
     }
+    // Do not copy navigation; mint a unique OStim id so export filenames do not collide.
+    stage.tags.retain(|t| !t.starts_with("ostim_nav:"));
+    let old_ostim = stage
+        .tags
+        .iter()
+        .find_map(|t| t.strip_prefix("ostim_id:"))
+        .map(|s| s.to_string());
+    stage.tags.retain(|t| !t.starts_with("ostim_id:"));
+    let (asset_library, fallback_graph, fallback_catalog, used_ostim_ids) = {
+        let mut prjct = PROJECT.lock().unwrap();
+        prjct.rebuild_asset_library();
+        let g = prjct
+            .scenes
+            .get(&scene_id)
+            .map(|s| s.graph.clone())
+            .unwrap_or_default();
+        let mut used = std::collections::HashSet::new();
+        for sc in prjct.scenes.values() {
+            for st in &sc.stages {
+                if let Some(oid) = st.tags.iter().find_map(|t| t.strip_prefix("ostim_id:")) {
+                    used.insert(oid.to_string());
+                }
+            }
+        }
+        let catalog: Vec<SceneCatalogEntry> = prjct
+            .scenes
+            .values()
+            .map(|s| SceneCatalogEntry {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                stages: s
+                    .stages
+                    .iter()
+                    .map(|st| SceneCatalogStage {
+                        id: st.id.clone(),
+                        name: st.name.clone(),
+                        ostim_id: st
+                            .tags
+                            .iter()
+                            .find_map(|t| t.strip_prefix("ostim_id:").map(|s| s.to_string())),
+                    })
+                    .collect(),
+            })
+            .collect();
+        (prjct.asset_library.clone(), g, catalog, used)
+    };
+    let base = old_ostim
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Stage");
+    let candidate = format!("{base}_Copy");
+    let mut unique = crate::project::ostim::events::sanitize_ostim_id(&candidate, &stage.id.0);
+    if used_ostim_ids.contains(&unique) {
+        let mut i = 2u32;
+        loop {
+            let next = crate::project::ostim::events::sanitize_ostim_id(
+                &format!("{base}_Copy{i}"),
+                &stage.id.0,
+            );
+            if !used_ostim_ids.contains(&next) {
+                unique = next;
+                break;
+            }
+            i += 1;
+        }
+    }
+    stage.tags.push(format!("ostim_id:{unique}"));
     open_stage_editor_impl(
         &app,
         EditorPayload {
-            scene: active_scene.id.clone(),
+            scene: scene_id,
             stage,
-            positions: active_scene.positions.clone(),
+            positions,
             dark: get_darkmode(),
+            asset_library,
+            graph: graph.unwrap_or(fallback_graph),
+            scene_catalog: scene_catalog.unwrap_or(fallback_catalog),
         },
     );
+}
+
+#[tauri::command]
+fn start_pack_export(app: tauri::AppHandle, formats: ExportFormats) {
+    start_export_with_tip(&app, formats);
+}
+
+#[tauri::command]
+async fn export_ostim_scene_json(
+    app: tauri::AppHandle,
+    scene_id: NanoID,
+) -> Result<String, String> {
+    let mod_name = {
+        let prjct = PROJECT.lock().unwrap();
+        if !prjct.scenes.contains_key(&scene_id) {
+            return Err(format!("Scene {} not found in project", scene_id.0));
+        }
+        prjct.fnis_mod_name()
+    };
+    let path = app
+        .dialog()
+        .file()
+        .set_title("Export OStim JSON (selected scene)")
+        .set_file_name(&mod_name)
+        .blocking_pick_folder()
+        .ok_or_else(|| "Export cancelled".to_string())?
+        .into_path()
+        .map_err(|e| e.to_string())?;
+    let pack_root = path.join(&mod_name);
+
+    let progress = JobProgress::new(Some(&app), "export", "Export OStim JSON");
+    progress.start("Writing scene JSON…");
+    let result = {
+        let prjct = PROJECT.lock().unwrap();
+        prjct.write_ostim_json_subset(&pack_root, &[scene_id.clone()], Some(&progress))
+    };
+    match &result {
+        Ok(()) => {
+            progress.done();
+            let msg = format!(
+                "Wrote OStim JSON for scene {} under {}",
+                scene_id.0,
+                pack_root.display()
+            );
+            Ok(msg)
+        }
+        Err(err) if err == "Export cancelled" => Err(err.clone()),
+        Err(err) => {
+            progress.fail(err);
+            Err(err.clone())
+        }
+    }
 }
 
 #[tauri::command]
@@ -1077,10 +1654,21 @@ async fn stage_save_and_close<R: Runtime>(
     scene: NanoID,
     positions: Vec<PositionInfo>,
     stage: Stage,
+    graph: Option<std::collections::HashMap<NanoID, crate::project::define::Node>>,
 ) -> () {
     // IDEA: make give this event some unique id to allow
     // front end distinguish the timings at which some stage editor has been opened
     info!("Saving Stage {}", stage.id.0);
+    let asset_library = {
+        let mut prjct = PROJECT.lock().unwrap();
+        // Harvest from this stage immediately (project scenes may still be dirty
+        // in the frontend until the next save_scene / write).
+        prjct.ingest_stage_assets(&stage);
+        let lib = prjct.asset_library.clone();
+        drop(prjct);
+        let _ = app.emit("on_asset_library_update", &lib);
+        lib
+    };
     app.emit_to(
         MAIN_WINDOW,
         "on_stage_saved",
@@ -1089,6 +1677,9 @@ async fn stage_save_and_close<R: Runtime>(
             stage,
             positions,
             dark: get_darkmode(),
+            asset_library,
+            graph: graph.unwrap_or_default(),
+            scene_catalog: vec![],
         },
     )
     .unwrap();

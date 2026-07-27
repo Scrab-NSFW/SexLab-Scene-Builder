@@ -31,6 +31,23 @@ impl EncodeBinary for Stripping {
     }
 }
 
+impl Stripping {
+    pub fn nothing() -> Self {
+        Self {
+            default: false,
+            everything: false,
+            nothing: true,
+            helmet: false,
+            gloves: false,
+            boots: false,
+        }
+    }
+
+    pub fn is_nothing(&self) -> bool {
+        self.nothing && !self.default && !self.everything
+    }
+}
+
 impl Default for Stripping {
     fn default() -> Self {
         Self {

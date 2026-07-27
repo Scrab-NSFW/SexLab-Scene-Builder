@@ -1,0 +1,130 @@
+# SexLab Registry package — `.slr` version 5
+# =============================================================================
+# This file documents the *logical* layout of the binary `.slr` format.
+# It is not loaded at runtime; numbers/strings below are illustrative.
+#
+# Wire conventions (all integers big-endian unless noted):
+#   string     = u64 length + UTF-8 bytes
+#   nanoid     = exactly 8 ASCII bytes (no length prefix) — scene/stage ids
+#   pack_hash  = exactly 4 ASCII bytes — FNIS/anim event prefix
+#   f32        = i32(round(value * 1000))
+#   bool       = u8 (0 / non-zero)
+#   vec[T]     = u64 count + T × count
+#   map[K,V]   = u64 count + (K, V) × count   (graph vertices)
+# =============================================================================
+
+package:
+  version: 5                    # u8 — format version (readers accept 1..=5)
+  name: "ExamplePack"           # string — display / package name
+  author: "Author"              # string — package author
+  hash: "Ab12"                  # 4 ASCII — anim event prefix (hash + event)
+  scenes:                       # u64 count, then Scene records
+    - id: "ScnId001"            # 8 ASCII — globally unique scene id
+      name: "Cowgirl Bed"       # string — player-facing scene name
+      positions:                # vec[PositionInfo] — actor slots (scene-level)
+        - race: 0               # u8 RaceKey (0 = Human, …)
+          sex: 0x01             # u8 bitfield: bit0 male, bit1 female, bit2 futa
+          scale: 1.0            # f32 — relative actor scale
+          extras: 0x00          # u8 bitfield: bit0 submissive, bit1 vampire, bit2 dead/unconscious
+      stages:                   # vec[Stage]
+        - id: "StageA01"        # 8 ASCII — unique within this scene
+          positions:            # vec[Position] — one per actor slot (same order as positions[])
+            - event: "A01"      # string — first anim event only (Havok plays the rest)
+              climax: false     # bool — actor climaxes on this stage
+              offset:           # Transform: x,y,z,r as f32 (stored ×1000 as i32)
+                x: 0.0
+                y: 0.0
+                z: 0.0
+                r: 0.0          # facing / yaw degrees
+              strips: 0x80      # u8 StripData:
+                                #   0x80 = use defaults
+                                #   0xFF = strip everything
+                                #   0x00 = strip nothing
+                                #   else bits: helmet|gloves|boots
+              tags: []          # vec[string] — position tags (v4+)
+              sosBend: 0        # i8 −9..9 — SoS bend (v5+); 0 = neutral / unset
+          fixed_len: 0.0        # f32 ms — one-shot duration; 0 = looping / no fixed timer
+          nav_text: ""          # string — legacy inbound label (via-edge / transition text)
+          tags:                 # vec[string] — stage tags (whitespace stripped, lowercased on write)
+            - "cowgirl"
+      graph:                    # map: vertex stage id → Node  (count must equal stages.len)
+        StageA01:               # key: 8 ASCII stage id of this vertex
+          edges:                # u64 count, then Edge × N (v5 interleaved layout)
+            - scene: "ScnId001" # 8 ASCII — absolute dest scene (same-scene: this scene's id)
+              stage: "StageB02" # 8 ASCII — destination stage id
+              priority: 3000    # i32 — nav sort weight (higher = preferred / shown first)
+              flags: 0          # u8 — bit0 = secondary/Return; other bits reserved
+              label: "Ride"     # string — player-facing branch label
+            - scene: "ScnId001"
+              stage: "StageA01"
+              priority: -1000
+              flags: 1          # secondary (Return-like); auto-advance deprioritizes
+              label: "Return"
+            - scene: "OtherScn" # cross-scene / cross-pack: other scene's id
+              stage: "HubStage1"
+              priority: 1000
+              flags: 0
+              label: "Go to hub"
+      furniture:
+        types: 0                # u32 bitfield — allowed furniture types
+        allow_bed: false        # bool — may use bed as furniture
+        offset:                 # Transform — furniture offset for this scene
+          x: 0.0
+          y: 0.0
+          z: 0.0
+          r: 0.0
+      private: false            # bool — hide from normal scene lookup / private scene
+
+# -----------------------------------------------------------------------------
+# Field glossary (quick reference)
+# -----------------------------------------------------------------------------
+#
+# package.version
+#   Binary format revision. v5 adds sosBend + absolute DestRef edges.
+#
+# package.hash
+#   4-char prefix prepended to every stage position event at runtime
+#   (e.g. hash "Ab12" + event "A01" → anim event "Ab12A01").
+#
+# scene.id / stage.id
+#   Fixed 8-char NanoIDs. Scene ids are registry-global; stage ids are
+#   unique only within their scene — hence edges always store both.
+#
+# PositionInfo (scene.positions[])
+#   Who may fill slot N (sex/race/scale/flags). Shared across all stages.
+#
+# Position (stage.positions[])
+#   What slot N does on this stage: anim event, climax, offset, strip mask,
+#   tags, and (v5) sosBend for Schlongs of Skyrim.
+#
+# Stage.fixed_len
+#   Milliseconds for non-looping clips. Looping poses export 0.
+#
+# Stage.nav_text
+#   Legacy single inbound description. Prefer GraphEdge.label for branches.
+#
+# GraphEdge.scene / .stage
+#   Absolute destination. Same-scene edges still write this scene's id.
+#   Missing target pack → edge stays unresolved; BranchTo may return "" /
+#   auto-advance skips it.
+#
+# GraphEdge.priority
+#   OStim-style priority (e.g. 3000 forward, -1000 Return). Nav UI sorts
+#   descending; auto-advance prefers highest among eligible edges.
+#
+# GraphEdge.flags
+#   bit0 SECONDARY — Return / reverse; dim in UI; skipped by auto-advance
+#   when any primary edge exists.
+#
+# GraphEdge.label
+#   Text shown in a future / custom nav menu (GetBranchLabel).
+#
+# Not in `.slr` (authoring / other exports only)
+#   Scene.root, editor x/y, anim_obj, multi-event sequences, add_cum,
+#   open_mouth/silent/strap_on, OStim look/expression/equip fields,
+#   pack_version (filename only: PackName_1.2.3.slr).
+#
+# Legacy notes
+#   v≤3: start stage id before stages[]; v3 Position had a discarded i8 after strips.
+#   v4: Position.tags; no sosBend; graph dest = stage id only (same scene).
+#   v5: Position.sosBend; graph dest = sceneId + stageId + priority/flags/label.

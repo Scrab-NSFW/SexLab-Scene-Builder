@@ -66,13 +66,18 @@ fn event0_and_unequip(race_path: &str) -> (&'static str, &'static str) {
 pub fn race_path_from_list(list_path: &std::path::Path) -> Option<String> {
     // .../meshes/actors/<race_path>/animations/<pack>/FNIS_*_List.txt
     let components: Vec<&str> = list_path.iter().filter_map(|c| c.to_str()).collect();
-    let actors_idx = components
+    let meshes_idx = components
+        .iter()
+        .position(|c| c.eq_ignore_ascii_case("meshes"))?;
+    let actors_rel = components[meshes_idx + 1..]
         .iter()
         .position(|c| c.eq_ignore_ascii_case("actors"))?;
-    let anim_idx = components
+    let actors_idx = meshes_idx + 1 + actors_rel;
+    let anim_rel = components[actors_idx + 1..]
         .iter()
         .position(|c| c.eq_ignore_ascii_case("animations"))?;
-    if anim_idx <= actors_idx + 1 {
+    let anim_idx = actors_idx + 1 + anim_rel;
+    if actors_idx != meshes_idx + 1 || anim_idx <= actors_idx + 1 {
         return None;
     }
     Some(components[actors_idx + 1..anim_idx].join("/"))
@@ -97,5 +102,10 @@ mod tests {
             "/x/meshes/actors/dlc02/scrib/animations/Pack/FNIS_Pack_scrib_List.txt",
         );
         assert_eq!(race_path_from_list(p).as_deref(), Some("dlc02/scrib"));
+        // Parent folder named "Animations" must not steal the match.
+        let p2 = Path::new(
+            "/mnt/Data/Coding/Animations/Export/pack/meshes/actors/character/animations/Pack/FNIS_Pack_List.txt",
+        );
+        assert_eq!(race_path_from_list(p2).as_deref(), Some("character"));
     }
 }

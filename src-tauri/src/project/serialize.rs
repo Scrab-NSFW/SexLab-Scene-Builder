@@ -219,6 +219,16 @@ impl EncodeBinary for u8 {
     }
 }
 
+impl EncodeBinary for i32 {
+    fn get_byte_size(&self) -> usize {
+        size_of::<i32>()
+    }
+
+    fn write_byte(&self, buf: &mut Vec<u8>) -> () {
+        buf.extend_from_slice(&self.to_be_bytes());
+    }
+}
+
 impl EncodeBinary for u32 {
     fn get_byte_size(&self) -> usize {
         size_of::<u32>()

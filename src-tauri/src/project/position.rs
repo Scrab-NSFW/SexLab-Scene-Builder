@@ -18,7 +18,7 @@ pub struct Position {
     #[serde(default)] // addition 2.0
     pub tags: Vec<String>,
 
-    // Unused in .slr binary, but kept for project JSON / SLAL round-trip
+    /// SoS bend −9…9 (`.slr` v5 `sosBend`).
     #[serde(default)]
     pub schlong: i8,
     #[serde(default)]
@@ -29,6 +29,33 @@ pub struct Position {
     pub silent: bool,
     #[serde(default)]
     pub strap_on: bool,
+
+    // OStim author fill-ins / round-trip (project JSON only; not in .slr)
+    /// OStim actor lookUp (−100..=100; negative = look down).
+    #[serde(default)]
+    pub look_up: i32,
+    /// OStim actor lookLeft (−100..=100; negative = look right).
+    #[serde(default)]
+    pub look_left: i32,
+    /// OStim animationIndex; None = use actor slot index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_index: Option<u32>,
+    /// OStim expressionOverride (e.g. "tongue", "eyesclosed").
+    #[serde(default)]
+    pub expression_override: String,
+    /// OStim expressionAction (integer action id; Sanguine et al.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression_action: Option<i32>,
+    /// OStim equip object type ids (space/comma-separated), author fill-in.
+    #[serde(default)]
+    pub equip_objects: String,
+    /// OStim actor feetOnGround (project JSON / OStim round-trip only).
+    #[serde(default)]
+    pub feet_on_ground: bool,
+    /// OStim actor scaleHeight (cm); None = omit on export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_height: Option<f32>,
+
     #[serde(skip_serializing, default)]
     pub extra: Extra,
     #[serde(skip_serializing, default)]
@@ -56,6 +83,15 @@ impl Position {
             open_mouth: reference.map_or(false, |pos| pos.open_mouth),
             silent: reference.map_or(false, |pos| pos.silent),
             strap_on: reference.map_or(false, |pos| pos.strap_on),
+            look_up: reference.map_or(0, |pos| pos.look_up),
+            look_left: reference.map_or(0, |pos| pos.look_left),
+            animation_index: reference.and_then(|pos| pos.animation_index),
+            expression_override: reference
+                .map_or_else(String::new, |pos| pos.expression_override.clone()),
+            expression_action: reference.and_then(|pos| pos.expression_action),
+            equip_objects: reference.map_or_else(String::new, |pos| pos.equip_objects.clone()),
+            feet_on_ground: reference.map_or(false, |pos| pos.feet_on_ground),
+            scale_height: reference.and_then(|pos| pos.scale_height),
             extra: Default::default(),
             scale: 1.0,
         }
@@ -115,6 +151,7 @@ impl EncodeBinary for Position {
             + self.offset.get_byte_size()
             + self.strip_data.get_byte_size()
             + self.tags.get_byte_size()
+            + 1
     }
 
     fn write_byte(&self, buf: &mut Vec<u8>) -> () {
@@ -125,6 +162,8 @@ impl EncodeBinary for Position {
         self.offset.write_byte(buf);
         self.strip_data.write_byte(buf);
         self.tags.write_byte(buf);
+        let bend = self.schlong.clamp(-9, 9);
+        buf.push(bend as u8);
     }
 }
 

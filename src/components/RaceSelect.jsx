@@ -2,18 +2,20 @@ import { useState, useEffect } from "react";
 import { Select } from "antd";
 import { invoke } from "@tauri-apps/api/core"
 
-function RaceSelect({ race, onSelect, ...raceSelectProps }) {
-  const [raceKeys, setRaceKeys] = useState([]);
+function RaceSelect({ race, onSelect, raceKeys: raceKeysProp, ...raceSelectProps }) {
+  const [raceKeysLocal, setRaceKeysLocal] = useState([]);
+  const raceKeys = Array.isArray(raceKeysProp) ? raceKeysProp : raceKeysLocal;
 
   useEffect(() => {
+    if (Array.isArray(raceKeysProp)) return;
     invoke('get_race_keys')
       .then((result) => {
-        setRaceKeys(Array.isArray(result) ? result : []);
+        setRaceKeysLocal(Array.isArray(result) ? result : []);
       })
       .catch(() => {
-        setRaceKeys([]);
+        setRaceKeysLocal([]);
       });
-  }, []);
+  }, [raceKeysProp]);
 
   return (
     <Select

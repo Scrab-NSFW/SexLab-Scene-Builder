@@ -27,9 +27,10 @@ pub struct Extra {
 impl Stage {
     pub fn new(parent_scene: &Scene) -> Self {
         let stage = parent_scene.stages.last();
+        let n = parent_scene.stages.len() + 1;
         Self {
             id: NanoID::new_nanoid(),
-            name: Default::default(),
+            name: format!("Stage {n}/{n}"),
             positions: stage.map_or_else(
                 || {
                     // Empty scene has no actors yet; first stage still needs one slot.
@@ -78,14 +79,31 @@ impl Stage {
         }
         Ok(())
     }
+
+    /// SexLab `.slr` navtext: inbound edge label. Pose outbound OStim summaries must not
+    /// leak here (they live in `ostim_nav:` tags).
+    pub fn slr_nav_text(&self) -> &str {
+        let is_transition = self
+            .tags
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("transition"));
+        if is_transition {
+            return self.extra.nav_text.as_str();
+        }
+        if self.tags.iter().any(|t| t.starts_with("ostim_nav:")) {
+            return "";
+        }
+        self.extra.nav_text.as_str()
+    }
 }
 
 impl EncodeBinary for Stage {
     fn get_byte_size(&self) -> usize {
+        let nav = self.slr_nav_text().to_string();
         self.id.get_byte_size()
             + self.positions.get_byte_size()
             + self.extra.fixed_len.get_byte_size()
-            + self.extra.nav_text.get_byte_size()
+            + nav.get_byte_size()
             + self.tags.get_byte_size()
     }
 
@@ -93,7 +111,7 @@ impl EncodeBinary for Stage {
         self.id.write_byte(buf);
         self.positions.write_byte(buf);
         self.extra.fixed_len.write_byte(buf);
-        self.extra.nav_text.write_byte(buf);
+        self.slr_nav_text().to_string().write_byte(buf);
         self.tags
             .iter()
             .map(|tag| {

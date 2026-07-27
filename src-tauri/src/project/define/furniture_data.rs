@@ -6,6 +6,10 @@ pub struct FurnitureData {
     pub furni_types: Vec<String>,
     pub allow_bed: bool,
     pub offset: Offset,
+    /// Optional OStim furniture type string override (project JSON only).
+    /// When set, OStim export uses this instead of the SLR→OStim table.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ostim_type: String,
 }
 
 impl Default for FurnitureData {
@@ -14,6 +18,7 @@ impl Default for FurnitureData {
           furni_types: vec!["None".into()],
           allow_bed: Default::default(),
           offset: Default::default(),
+          ostim_type: String::new(),
       }
   }
 }

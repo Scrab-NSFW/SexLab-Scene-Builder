@@ -1,6 +1,7 @@
-import React, { useState } from "react";
-import { Button, Card, Checkbox, Col, Input, Row, Select, Space, Tooltip, InputNumber, Dropdown } from "antd";
+import React, { useMemo, useState } from "react";
+import { AutoComplete, Button, Card, Checkbox, Col, Input, Row, Select, Space, Tooltip, InputNumber, Dropdown } from "antd";
 import RaceSelect from "../components/RaceSelect";
+import { rememberAssetValues, suggestAssetOptions } from "../common/assetLibrary";
 import './PositionField.css'
 
 const stripOptions = [
@@ -35,10 +36,106 @@ const makeStrips = (list = []) => {
   );
 };
 
-function PositionField({ position, info, onChange }) {
+function filterPrefixOptions(candidates, typed) {
+  const q = String(typed ?? '').trim().toLowerCase().replace(/\.hkx$/i, '');
+  const list = !q
+    ? candidates
+    : candidates.filter((c) => String(c).toLowerCase().startsWith(q));
+  return list.slice(0, 40).map((value) => ({ value }));
+}
+
+/** Split multi-token field into leading text + current token for suggestions. */
+function splitTrailingToken(raw) {
+  const s = String(raw ?? '');
+  const m = s.match(/^(.*?)([^\s,]*)$/);
+  return { lead: m?.[1] ?? '', token: m?.[2] ?? '' };
+}
+
+function HkxAutoComplete({ value, onChange, onCommit, options, placeholder, addonBefore }) {
+  const filtered = useMemo(
+    () => filterPrefixOptions(options, value),
+    [options, value]
+  );
+  return (
+    <AutoComplete
+      value={value ?? ''}
+      options={filtered}
+      onChange={(v) => onChange(String(v ?? '').replace(/\.hkx$/i, ''))}
+      onSelect={(v) => {
+        const stem = String(v ?? '').replace(/\.hkx$/i, '');
+        onChange(stem);
+        onCommit?.(stem);
+      }}
+      onBlur={() => onCommit?.(value)}
+      style={{ width: '100%' }}
+    >
+      <Input addonBefore={addonBefore} addonAfter=".hkx" placeholder={placeholder} />
+    </AutoComplete>
+  );
+}
+
+function TokenAutoComplete({
+  value,
+  onChange,
+  onCommit,
+  options,
+  placeholder,
+  addonBefore,
+}) {
+  const { lead, token } = splitTrailingToken(value);
+  const filtered = useMemo(
+    () => filterPrefixOptions(options, token),
+    [options, token]
+  );
+  const commitWhole = (raw) => {
+    onCommit?.(raw);
+  };
+  return (
+    <AutoComplete
+      value={value ?? ''}
+      options={filtered}
+      onChange={(v) => onChange(String(v ?? ''))}
+      onSelect={(v) => {
+        const next = `${lead}${v}`;
+        onChange(next);
+        commitWhole(next);
+      }}
+      onBlur={() => commitWhole(value)}
+      style={{ width: '100%' }}
+    >
+      <Input addonBefore={addonBefore} placeholder={placeholder} />
+    </AutoComplete>
+  );
+}
+
+function PositionField({ position, info, onChange, raceKeys: raceKeysProp, assetLibrary }) {
   const [basicAnim, setBasicAnim] = useState(true);
   const [workingAnim, setWorkingAnim] = useState(undefined);
   const [sequenceOpen, setSequenceOpen] = useState(false);
+  const raceKeys = Array.isArray(raceKeysProp) ? raceKeysProp : null;
+
+  const eventOptions = useMemo(
+    () => suggestAssetOptions(assetLibrary, 'events'),
+    [assetLibrary]
+  );
+  const animObjOptions = useMemo(
+    () => suggestAssetOptions(assetLibrary, 'anim_objects'),
+    [assetLibrary]
+  );
+  const equipOptions = useMemo(
+    () => suggestAssetOptions(assetLibrary, 'equip_objects'),
+    [assetLibrary]
+  );
+
+  const rememberEvent = (stem) => {
+    if (stem) rememberAssetValues('events', stem);
+  };
+  const rememberAnimObj = (raw) => {
+    if (raw) rememberAssetValues('anim_objects', raw);
+  };
+  const rememberEquip = (raw) => {
+    if (raw) rememberAssetValues('equip_objects', raw);
+  };
 
   const makeSequenceMenu = (events) => {
     let sequences = [];
@@ -46,16 +143,17 @@ function PositionField({ position, info, onChange }) {
       sequences.push({
         key: i,
         label: (
-          <Input
-            addonAfter={'.hkx'}
-            addonBefore={'+'}
+          <HkxAutoComplete
             value={position.event[i]}
-            onChange={(e) => {
+            options={eventOptions}
+            onChange={(stem) => {
               let evt = [...position.event];
-              if (!e.target.value) evt.splice(i, 1);
-              else evt[i] = e.target.value;
+              if (!stem) evt.splice(i, 1);
+              else evt[i] = stem;
               onChange({ ...position, event: evt }, info);
             }}
+            onCommit={rememberEvent}
+            addonBefore="+"
           />
         ),
       });
@@ -64,22 +162,22 @@ function PositionField({ position, info, onChange }) {
       key: 'new',
       label: (
         <Space>
-          <Input
-            addonAfter={'.hkx'}
-            addonBefore={'+'}
+          <HkxAutoComplete
             value={workingAnim}
-            onChange={(e) => {
-              setWorkingAnim(e.target.value);
-            }}
+            options={eventOptions}
+            onChange={setWorkingAnim}
+            onCommit={rememberEvent}
             placeholder="New Behavior File"
-            onPressEnter={() => {
-              onChange({ ...position, event: [...workingAnim, workingAnim] }, info);
-              setWorkingAnim(undefined);
-            }}
+            addonBefore="+"
           />
           <Button
             onClick={() => {
-              onChange({ ...position, event: [...workingAnim, workingAnim] }, info);
+              if (!workingAnim) return;
+              rememberEvent(workingAnim);
+              onChange(
+                { ...position, event: [...(position.event || []), workingAnim] },
+                info
+              );
               setWorkingAnim(undefined);
             }}
           >
@@ -98,6 +196,7 @@ function PositionField({ position, info, onChange }) {
           <Card className="position-attribute-card" title={'Race'}>
             <RaceSelect
               race={info.race}
+              raceKeys={raceKeys}
               onSelect={(e) => {
                 onChange(position, { ...info, race: e, sex: { ...info.sex, futa: e === 'Human' && info.sex.futa } });
               }}
@@ -184,13 +283,14 @@ function PositionField({ position, info, onChange }) {
             }
           >
             {basicAnim ? (
-              <Input
-                addonAfter={'.hkx'}
+              <HkxAutoComplete
                 value={position.event[0]}
-                onChange={(e) => {
-                  onChange({ ...position, event: [e.target.value] }, info)
-                }}
+                options={eventOptions}
                 placeholder="Behavior file"
+                onChange={(stem) =>
+                  onChange({ ...position, event: [stem] }, info)
+                }
+                onCommit={rememberEvent}
               />
             ) : (
               <Dropdown
@@ -201,15 +301,24 @@ function PositionField({ position, info, onChange }) {
                 onOpenChange={(open) => setSequenceOpen(open)}
                 open={sequenceOpen}
               >
-                <Input
-                  addonBefore={'s'}
-                  addonAfter={'.hkx'}
-                  value={position.event[0]}
-                  onChange={(e) => {
-                    onChange({ ...position, event: [e.target.value, ...position.event.slice(1)] }, info)
-                  }}
-                  placeholder="Behavior file"
-                />
+                <div>
+                  <HkxAutoComplete
+                    value={position.event[0]}
+                    options={eventOptions}
+                    placeholder="Behavior file"
+                    addonBefore="s"
+                    onChange={(stem) =>
+                      onChange(
+                        {
+                          ...position,
+                          event: [stem, ...position.event.slice(1)],
+                        },
+                        info
+                      )
+                    }
+                    onCommit={rememberEvent}
+                  />
+                </div>
               </Dropdown>
             )}
           </Card>
@@ -229,16 +338,18 @@ function PositionField({ position, info, onChange }) {
               </Tooltip>
             }
           >
-            <Input
+            <TokenAutoComplete
               value={
                 Array.isArray(position.anim_obj)
                   ? position.anim_obj.filter(Boolean).join(' ')
                   : (position.anim_obj ?? '')
               }
-              onChange={(e) => {
-                onChange({ ...position, anim_obj: e.target.value }, info)
-              }}
+              options={animObjOptions}
               placeholder="Editor ID"
+              onChange={(v) =>
+                onChange({ ...position, anim_obj: v }, info)
+              }
+              onCommit={rememberAnimObj}
             />
           </Card>
         </Col>
@@ -459,6 +570,83 @@ function PositionField({ position, info, onChange }) {
                   {label}
                 </Checkbox>
               ))}
+            </Space>
+          </Card>
+        </Col>
+        <Col span={24}> {/* OStim author fill-ins */}
+          <Card
+            className="position-attribute-card position-ostim-compat-card"
+            size="small"
+            title={'OStim compatibility'}
+            extra={
+              <Tooltip className="tool-tip"
+                title={
+                  'Optional OStim actor fields. Stored in the project JSON and written on OStim export. Not used by .slr playback — fill these when authoring or converting packs for OStim.'
+                }
+              >
+                <Button type="text">Info</Button>
+              </Tooltip>
+            }
+          >
+            <Space direction="vertical" style={{ width: '100%' }} size="small">
+              <Space wrap size="middle">
+                <InputNumber
+                  addonBefore="lookUp"
+                  value={position.look_up ?? 0}
+                  min={-100}
+                  max={100}
+                  onChange={(v) =>
+                    onChange({ ...position, look_up: typeof v === 'number' ? v : 0 }, info)
+                  }
+                />
+                <InputNumber
+                  addonBefore="lookLeft"
+                  value={position.look_left ?? 0}
+                  min={-100}
+                  max={100}
+                  onChange={(v) =>
+                    onChange({ ...position, look_left: typeof v === 'number' ? v : 0 }, info)
+                  }
+                />
+                <InputNumber
+                  addonBefore="animIndex"
+                  placeholder="default"
+                  value={
+                    position.animation_index === null || position.animation_index === undefined
+                      ? null
+                      : position.animation_index
+                  }
+                  min={0}
+                  max={8}
+                  onChange={(v) =>
+                    onChange(
+                      {
+                        ...position,
+                        animation_index: typeof v === 'number' ? v : null,
+                      },
+                      info
+                    )
+                  }
+                />
+              </Space>
+              <Input
+                addonBefore="expression"
+                placeholder="e.g. tongue (expressionOverride)"
+                value={position.expression_override ?? ''}
+                onChange={(e) =>
+                  onChange({ ...position, expression_override: e.target.value }, info)
+                }
+              />
+              <TokenAutoComplete
+                addonBefore="equip"
+                placeholder="OStim equip object types (space-separated)"
+                value={position.equip_objects ?? ''}
+                options={equipOptions}
+                onChange={(v) =>
+                  onChange({ ...position, equip_objects: v }, info)
+                }
+                onCommit={rememberEquip}
+              />
             </Space>
           </Card>
         </Col>

@@ -13,6 +13,10 @@ export function getAppTheme(isDark) {
           colorBorder: 'rgba(255, 255, 255, 0.18)',
           colorBorderSecondary: 'rgba(255, 255, 255, 0.12)',
           borderRadius: 6,
+          fontFamily:
+            '"Source Sans 3", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+          fontFamilyCode:
+            '"IBM Plex Mono", "Consolas", "Courier New", monospace',
           // #1677ff reads neon on charcoal
           colorPrimary: '#5b9bd5',
           colorPrimaryHover: '#7eb0df',
@@ -26,6 +30,10 @@ export function getAppTheme(isDark) {
         }
       : {
           borderRadius: 6,
+          fontFamily:
+            '"Source Sans 3", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+          fontFamilyCode:
+            '"IBM Plex Mono", "Consolas", "Courier New", monospace',
           // keep white cards distinct on grey shell
           colorBorder: 'rgba(33, 35, 48, 0.28)',
           colorBorderSecondary: 'rgba(33, 35, 48, 0.16)',
